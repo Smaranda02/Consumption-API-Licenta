@@ -23,17 +23,18 @@ app.use(bodyParser.json());
 const db = new sqlite3.Database('./consumption.db');
 
 db.serialize(() => {
+ 
   db.run(`
     CREATE TABLE IF NOT EXISTS DevicesConsumption (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       readingDate TEXT NOT NULL,
       device TEXT NOT NULL,
-      min_current REAL,
-      max_current REAL,
-      UNIQUE(readingDate, device)
-    )
-  `);
+      current REAL,
+      timestamp INTEGER NOT NULL
+    )`
+  );
 
+  
   db.run(`
     CREATE TABLE IF NOT EXISTS SolarPanelEnergy (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,89 +48,53 @@ db.serialize(() => {
 
 
 //populate the whole db 
-// const startDate = new Date('2024-08-01');
-// const endDate = new Date('2025-04-11');
-// const devices = ['ESP1', 'ESP2', 'Solar Panel'];
+const startDate = new Date('2024-08-01');
+const endDate = new Date('2025-06-20');
+const devices = ['ESP1', 'ESP2', 'Solar Panel'];
 
-// function getRandomInRange(min, max) {
-//   return +(Math.random() * (max - min) + min).toFixed(2);
-// }
+function getRandomInRange(min, max) {
+  return +(Math.random() * (max - min) + min).toFixed(2);
+}
 
-// function formatDate(date) {
-//   return date.toISOString().split('T')[0]; // YYYY-MM-DD
-// }
+function formatDate(date) {
+  return date.toISOString().split('T')[0]; // YYYY-MM-DD
+}
 
-// db.serialize(() => {
-//   const stmt = db.prepare(`
-//     INSERT OR IGNORE INTO DevicesConsumption (readingDate, device, min_current, max_current)
-//     VALUES (?, ?, ?, ?)
-//   `);
+db.serialize(() => {
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO DevicesConsumption (readingDate, device, current, timestamp)
+    VALUES (?, ?, ?, ?)
+  `);
 
-//   const currentDate = new Date(startDate);
+  const stmtSolarPanel = db.prepare(`
+    INSERT OR IGNORE INTO SolarPanelEnergy (readingDate, power, energy, timestamp)
+    VALUES (?, ?, ?, ?)
+  `);
 
-//   while (currentDate <= endDate) {
-//     const readingDate = formatDate(currentDate);
+  const currentDate = new Date(startDate);
 
-//     devices.forEach(device => {
-//       const min_current = getRandomInRange(80, 140);
-//       const max_current = getRandomInRange(min_current + 10, min_current + 150);
+  while (currentDate <= endDate) {
+    const readingDate = formatDate(currentDate);
 
-//       stmt.run(readingDate, device, min_current, max_current);
-//     });
+    devices.forEach(device => {
 
-//     currentDate.setDate(currentDate.getDate() + 1);
-//   }
-
-//   stmt.finalize();
-//   console.log('✅ Database populated successfully.');
-// });
-
-app.post('/reading', (req, res) => {
-    const { device, current } = req.body;
-
-    // console.log("Received: ", req.body);
-  
-    if (!device || current == null) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-  
-    const today = new Date().toISOString().split('T')[0]; // 'YYYY-MM-DD'
-    // console.log(today)
-  
-    if(device != "Solar Panel"){
-      db.run(`
-            INSERT INTO DevicesConsumption (readingDate, device, min_current, max_current)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(readingDate, device) DO UPDATE SET
-              min_current = MIN(min_current, excluded.min_current),
-              max_current = MAX(max_current, excluded.max_current)
-          `, [today, device, current, current], function(err) {
-            if (err) {
-              console.log("Error: ");
-              console.error(err.message);
-              return res.status(500).json({ error: 'Database error' });
-            }
-            res.json({ message: 'Reading stored/updated successfully' });
-          });
-    }
-   
-  });
-  
-
-app.get('/averages', (req, res) => {
-    db.all(`
-      SELECT readingDate, device, 
-             (min_current + max_current) / 2 AS average_current
-      FROM DevicesConsumption
-      ORDER BY readingDate ASC
-    `, [], (err, rows) => {
-      if (err) {
-        console.error(err.message);
-        return res.status(500).json({ error: 'Database error' });
+      if(device != 'Solar Panel'){
+        const current = getRandomInRange(90, 160);
+        stmt.run(readingDate, device, current, 0);
       }
-      res.json(rows);
+      else {
+        const power = getRandomInRange(1, 4);
+        stmtSolarPanel.run(readingDate, power, 0, 0);
+      }
     });
-  });
+
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+
+  stmt.finalize();
+  stmtSolarPanel.finalize();
+  console.log('✅ Database populated successfully.');
+});
 
 
 // try {
@@ -157,6 +122,15 @@ app.listen(PORT, '0.0.0.0', () => {
   } catch (error) {
     console.error('❌ Cron job failed:', error.message);
   }
+
+  try {
+    const response = await axios.post('http://127.0.0.1:3000/end-of-day-mcu', {
+      date: today,
+    });
+    console.log('✅ Cron job succeeded:', response.data);
+  } catch (error) {
+    console.error('❌ Cron job failed:', error.message);
+  }
 });
 
 });
@@ -172,95 +146,148 @@ app.get('/all', (req, res) => {
     });
   });
 
-
-  
-
-app.get('/min-current', (req, res) => {
-  const { device } = req.query;
-  db.all(`SELECT min_current FROM DevicesConsumption 
-          WHERE device = ? `, [device], (err, rows) => {
-    if (err) {
-      console.error(err.message);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    res.json(rows);
-  });
-});
-
-
-
-
 app.get('/avg-current-today', (req, res) => {
   const { device } = req.query;
-  db.all(`SELECT (min_current + max_current) / 2 AS average_current  FROM DevicesConsumption 
-          WHERE device = ? AND readingDate = DATE('now', 'localtime')`, [device], (err, rows) => {
-    if (err) {
-      console.error(err.message);
-      return res.status(500).json({ error: 'Database error' });
+
+  if (!device) {
+    return res.status(400).json({ error: 'Device parameter is required' });
+  }
+
+  db.get(
+    `SELECT AVG(current) AS average_current 
+     FROM DevicesConsumption 
+     WHERE device = ? 
+       AND readingDate = DATE('now', 'localtime')`,
+    [device],
+    (err, row) => {
+      if (err) {
+        console.error("Database error:", err.message);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      res.json([row]); // Wrap in array if you want to stay consistent with your frontend
     }
-    res.json(rows);
-  });
+  );
 });
-
-
-
 
 app.get('/min-current-today', (req, res) => {
   const { device } = req.query;
-  db.all(`SELECT min_current  FROM DevicesConsumption 
-          WHERE device = ? AND readingDate = DATE('now', 'localtime')`, [device], (err, rows) => {
+  
+  const sql = `
+    SELECT MIN(current) as min_current
+    FROM (
+      SELECT timestamp, current
+      FROM DevicesConsumption
+      WHERE device = ?
+        AND readingDate = DATE('now', 'localtime')
+      GROUP BY timestamp
+    )
+  `;
+
+  db.get(sql, [device], (err, row) => {
     if (err) {
       console.error(err.message);
       return res.status(500).json({ error: 'Database error' });
     }
-    res.json(rows);
+    res.json([row]); // send as array to keep frontend compatible
   });
 });
 
 
 app.get('/consumption', (req, res) => {
-    const { device, range } = req.query;
-  
-    if (!device || !range) {
-      return res.status(400).json({ error: 'Missing device or range parameter' });
-    }
-  
-    let dateCondition = '';
-    switch (range) {
-      case 'day':
-        dateCondition = "readingDate = DATE('now', 'localtime')";
-        break;
-      case 'week':
-        dateCondition = "readingDate >= DATE('now', '-6 days', 'localtime')";
-        break;
-      case 'month':
-        dateCondition = "readingDate >= DATE('now', '-1 month', 'localtime')";
-        break;
-      case '6months':
-        dateCondition = "readingDate >= DATE('now', '-6 months', 'localtime')";
-        break;
-      case 'year':
-        dateCondition = "readingDate >= DATE('now', '-1 year', 'localtime')";
-        break;
-      default:
-        return res.status(400).json({ error: 'Invalid range parameter' });
-    }
-  
-    db.all(`
-      SELECT readingDate, 
-             (min_current + max_current) / 2 AS average_current
-      FROM DevicesConsumption
-      WHERE device = ? AND ${dateCondition}
-      ORDER BY readingDate ASC
-    `, [device], (err, rows) => {
+  const { device, range } = req.query;
+
+  if (!device || !range) {
+    return res.status(400).json({ error: 'Missing device or range parameter' });
+  }
+
+  let dateCondition = '';
+  switch (range) {
+    case 'day':
+      dateCondition = "readingDate = DATE('now', 'localtime')";
+      break;
+    case 'week':
+      dateCondition = "readingDate >= DATE('now', '-6 days', 'localtime')";
+      break;
+    case 'month':
+      dateCondition = "readingDate >= DATE('now', '-1 month', 'localtime')";
+      break;
+    case '6months':
+      dateCondition = "readingDate >= DATE('now', '-6 months', 'localtime')";
+      break;
+    case 'year':
+      dateCondition = "readingDate >= DATE('now', '-1 year', 'localtime')";
+      break;
+    default:
+      return res.status(400).json({ error: 'Invalid range parameter' });
+  }
+
+ 
+
+  if(range == "day"){
+
+    const todayQuery = `
+    SELECT readingDate, device, current, timestamp
+    FROM DevicesConsumption
+    WHERE device = ? AND ${dateCondition}
+  `;
+
+
+    db.all(todayQuery, [device], (err, rows) => {
       if (err) {
-        console.error(err.message);
-        return res.status(500).json({ error: 'Database error' });
+        console.error("Database error ( rows):", err.message);
+        return res.status(500).json({ error: 'Database error ( rows)' });
       }
+
       res.json(rows);
     });
-  });
+
+  }
   
+  else{
+  // 1. Fetch all days except today
+  const pastQuery = `
+    SELECT readingDate, device, current, timestamp
+    FROM DevicesConsumption
+    WHERE device = ? AND ${dateCondition}
+      AND readingDate < DATE('now', 'localtime')
+    GROUP BY readingDate
+    ORDER BY readingDate ASC
+  `;
+
+  db.all(pastQuery, [device], (err, pastRows) => {
+    if (err) {
+      console.error("Database error (past rows):", err.message);
+      return res.status(500).json({ error: 'Database error (past rows)' });
+    }
+
+    // 2. Reuse /avg-current-today logic here
+    db.get(`
+      SELECT AVG(current) AS average_current
+      FROM DevicesConsumption
+      WHERE device = ?
+        AND readingDate = DATE('now', 'localtime')
+    `, [device], (avgErr, avgRow) => {
+      if (avgErr) {
+        console.error("Database error (today average):", avgErr.message);
+        return res.status(500).json({ error: 'Database error (avg today)' });
+      }
+
+      if (avgRow && avgRow.average_current != null) {
+        pastRows.push({
+          readingDate: new Date().toISOString().split('T')[0],
+          device,
+          current: avgRow.average_current,
+          timestamp: 0
+        });
+      }
+
+      res.json(pastRows);
+    });
+  });
+  }
+
+});
 
 
 app.get('/consumptionSolarPanel', (req, res) => {
@@ -311,7 +338,9 @@ app.get('/consumptionSolarPanel', (req, res) => {
 app.post('/solar-panel-reading', (req, res) => {
     const { power, timestamp, time } = req.body;
 
-    // console.log("Received ", timestamp);
+    console.log("Received ", timestamp, time);
+
+
     if (power == null || !timestamp) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -321,7 +350,7 @@ app.post('/solar-panel-reading', (req, res) => {
     db.run(`
       INSERT INTO SolarPanelEnergy (readingDate, power, energy, timestamp)
       VALUES (?, ?, ?, ?)
-    `, [timestamp.split('T')[0], power, energy, time], function(err) {
+    `, [timestamp, power, energy, time], function(err) {
       if (err) {
         console.error(err.message);
         return res.status(500).json({ error: 'Database error' });
@@ -331,10 +360,35 @@ app.post('/solar-panel-reading', (req, res) => {
   });
 
 
+
+  
+app.post('/mcu-reading', (req, res) => {
+    const { device, current, readingDate, time} = req.body;
+
+    // console.log("Received ", timestamp);
+    if (current == null || !readingDate) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+      
+    db.run(`
+      INSERT INTO DevicesConsumption (readingDate, device, current, timestamp)
+      VALUES (?, ?, ?, ?)
+    `, [readingDate.split('T')[0], device, current, time], function(err) {
+      if (err) {
+        console.error(err.message);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      res.json({ message: 'MCU reading stored successfully' });
+    });
+  });
+
+
+
 app.post('/end-of-day-solar-panel', (req, res) => {
 
     const { date } = req.body; // Format: 'YYYY-MM-DD'
-  
+
+    console.log("End of day");
     if (!date) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -368,6 +422,62 @@ app.post('/end-of-day-solar-panel', (req, res) => {
         // Step 4: Delete hourly records for that date
         db.run(`
           DELETE FROM SolarPanelEnergy
+          WHERE readingDate = ? AND timestamp != ?
+        `, [date, `${date}T00:00:00`], function (err) {
+          if (err) {
+            console.error("Cleanup error:", err.message);
+            return res.status(500).json({ error: 'Cleanup failed after aggregation' });
+          }
+  
+          // ✅ Final response sent only once
+          res.json({ message: '✅ Total energy stored and hourly data cleaned up', totalEnergy });
+        });
+      });
+    });
+  });
+  
+
+
+  
+app.post('/end-of-day-mcu', (req, res) => {
+
+    const { date } = req.body; // Format: 'YYYY-MM-DD'
+  
+    if (!date) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+  
+    // Step 1: Fetch all energy readings for the given day
+    db.all(`
+      SELECT current FROM DevicesConsumption
+      WHERE readingDate = ?
+    `, [date], (err, rows) => {
+      if (err) {
+        console.error(err.message);
+        return res.status(500).json({ error: 'Database error while fetching energy readings' });
+      }
+  
+      // Step 2: Sum up total energy
+      let totalCurrent = 0;
+      rows.forEach(row => {
+        totalCurrent += row.current;
+      });
+
+      let average_current = totalCurrent / 24;
+  
+      // Step 3: Insert or update total daily energy entry
+      db.run(`
+        INSERT INTO DevicesConsumption (readingDate, device, current, timestamp)
+        VALUES (?, ?, ?, ?)
+      `, [date, device, average_current, `${date}T00:00:00`], function (err) {
+        if (err) {
+          console.error("Insert error:", err.message);
+          return res.status(500).json({ error: 'Failed to store total energy for the day' });
+        }
+  
+        // Step 4: Delete hourly records for that date
+        db.run(`
+          DELETE FROM DevicesConsumption
           WHERE readingDate = ? AND timestamp != ?
         `, [date, `${date}T00:00:00`], function (err) {
           if (err) {
